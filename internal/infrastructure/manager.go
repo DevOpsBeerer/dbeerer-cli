@@ -1,6 +1,7 @@
 package infrastructure
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -171,22 +172,128 @@ func (m *Manager) checkComponents() map[string]bool {
 		"keycloak":           false,
 	}
 
-	// Check cert-manager
-	if err := exec.Command("kubectl", "get", "pods", "-n", "cert-manager").Run(); err == nil {
-		components["cert-manager"] = true
+	// Define component configurations
+	componentConfigs := []struct {
+		name        string
+		helmRelease string
+		namespace   string
+		selector    string // optional label selector for pods
+	}{
+		{
+			name:        "cert-manager",
+			helmRelease: "cert-manager",
+			namespace:   "cert-manager",
+		},
+		{
+			name:        "ingress-controller",
+			helmRelease: "ingress-nginx",
+			namespace:   "ingress-nginx",
+			selector:    "app.kubernetes.io/name=ingress-nginx",
+		},
+		{
+			name:        "keycloak",
+			helmRelease: "sso",
+			namespace:   "sso",
+		},
 	}
 
-	// Check ingress controller (usually in kube-system for K3s traefik)
-	if err := exec.Command("kubectl", "get", "pods", "-n", "kube-system", "-l", "app.kubernetes.io/name=traefik").Run(); err == nil {
-		components["ingress-controller"] = true
-	}
-
-	// Check keycloak/SSO (assuming it's deployed in devopsbeerer namespace)
-	if err := exec.Command("kubectl", "get", "pods", "-n", "devopsbeerer").Run(); err == nil {
-		components["keycloak"] = true
+	for _, config := range componentConfigs {
+		components[config.name] = m.isComponentHealthy(config.helmRelease, config.namespace, config.selector)
 	}
 
 	return components
+}
+
+func (m *Manager) isComponentHealthy(helmRelease, namespace, selector string) bool {
+	// First check Helm release status
+	if !m.isHelmReleaseDeployed(helmRelease, namespace) {
+		return false
+	}
+
+	// Then check pod readiness
+	return m.arePodsReady(namespace, selector)
+}
+
+func (m *Manager) isHelmReleaseDeployed(releaseName, namespace string) bool {
+	cmd := exec.Command("helm", "status", releaseName, "-n", namespace, "-o", "json")
+	output, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+
+	// Parse Helm status
+	var status struct {
+		Info struct {
+			Status string `json:"status"`
+		} `json:"info"`
+	}
+
+	if err := json.Unmarshal(output, &status); err != nil {
+		return false
+	}
+
+	return status.Info.Status == "deployed"
+}
+
+func (m *Manager) arePodsReady(namespace, selector string) bool {
+	args := []string{"get", "pods", "-n", namespace, "-o", "json"}
+	if selector != "" {
+		args = append(args, "-l", selector)
+	}
+
+	cmd := exec.Command("kubectl", args...)
+	output, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+
+	// Parse pod list
+	var podList struct {
+		Items []struct {
+			Status struct {
+				Conditions []struct {
+					Type   string `json:"type"`
+					Status string `json:"status"`
+				} `json:"conditions"`
+				ContainerStatuses []struct {
+					Ready bool `json:"ready"`
+				} `json:"containerStatuses"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+
+	if err := json.Unmarshal(output, &podList); err != nil {
+		return false
+	}
+
+	// Check if we have any pods
+	if len(podList.Items) == 0 {
+		return false
+	}
+
+	// Check if all pods are ready
+	for _, pod := range podList.Items {
+		// Check container readiness
+		for _, container := range pod.Status.ContainerStatuses {
+			if !container.Ready {
+				return false
+			}
+		}
+
+		// Check pod Ready condition
+		podReady := false
+		for _, condition := range pod.Status.Conditions {
+			if condition.Type == "Ready" && condition.Status == "True" {
+				podReady = true
+				break
+			}
+		}
+		if !podReady {
+			return false
+		}
+	}
+
+	return true
 }
 
 // InfrastructureStatus represents the status of infrastructure components

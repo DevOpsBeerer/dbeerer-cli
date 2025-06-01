@@ -16,12 +16,14 @@ var listCmd = &cobra.Command{
 }
 
 func runListCommand(cmd *cobra.Command, args []string) error {
-	fmt.Println("🍺 Fetching available scenarios...")
+	fmt.Println("🔁 Fetching available scenarios...")
 
 	// Create scenario manager
-	manager := scenarios.NewManager("")
+	manager, err := scenarios.NewManager()
+	if err != nil {
+		return fmt.Errorf("failed to fetch scenarios: %w", err)
+	}
 
-	// Fetch scenarios from GitHub
 	scenarioList, err := manager.ListScenarios()
 	if err != nil {
 		return fmt.Errorf("failed to fetch scenarios: %w", err)
